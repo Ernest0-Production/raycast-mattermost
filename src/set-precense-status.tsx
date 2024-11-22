@@ -1,4 +1,4 @@
-import { Action, ActionPanel, Icon, List, showToast, Toast, Image } from "@raycast/api";
+import { Action, ActionPanel, Icon, List, showToast, Toast, Image, Color } from "@raycast/api";
 import { useEffect, useState } from "react";
 import { withAuthorization } from "./shared/withAuthorization";
 import { MattermostClient } from "./shared/MattermostClient";
@@ -29,11 +29,11 @@ function modelToUI(model: UserProfileStatusKind): UserProfileStatusKindUI {
       break;
     case "offline":
       title = "Offline";
-      icon = "🔘";
+      icon = { source: Icon.Circle, tintColor: Color.SecondaryText };
       break;
     case "online":
       title = "Online";
-      icon = "mattermost-online.png";
+      icon = { source: Icon.CircleFilled, tintColor: Color.Green };
       break;
   }
 
@@ -88,7 +88,6 @@ function StatusesList() {
               key={kind.model}
               title={kind.title}
               icon={kind.icon}
-              accessories={[{ icon: keyNumberEmojiMap.get(index + 2) }]}
               actions={
                 <ActionPanel>
                   <Action
@@ -107,7 +106,6 @@ function StatusesList() {
                         });
                         showToast(Toast.Style.Success, "Success set status");
                       } catch (error) {
-                        console.error(error);
                         showToast(Toast.Style.Failure, `Fail ${error}`);
                       }
                     }}
@@ -120,15 +118,3 @@ function StatusesList() {
     </List>
   );
 }
-const keyNumberEmojiMap = new Map<number, string>([
-  [1, "1️⃣"],
-  [2, "2️⃣"],
-  [3, "3️⃣"],
-  [4, "4️⃣"],
-  [5, "5️⃣"],
-  [6, "6️⃣"],
-  [7, "7️⃣"],
-  [8, "8️⃣"],
-  [9, "9️⃣"],
-  [10, "🔟"],
-]);

@@ -9,26 +9,16 @@ import {
   getPreferenceValues,
   open,
   showToast,
-  LocalStorage,
   openExtensionPreferences,
+  Color,
 } from "@raycast/api";
-import { getAvatarIcon } from "@raycast/utils";
+import { getAvatarIcon, useCachedState } from "@raycast/utils";
 import { useEffect, useState } from "react";
 import { DateTime } from "luxon";
 import { MattermostClient } from "./shared/MattermostClient";
 import { Channel, UserProfile } from "./shared/MattermostTypes";
 import { withAuthorization } from "./shared/withAuthorization";
 import { runAppleScriptSync } from "run-applescript";
-
-async function getCachedState(): Promise<State | undefined> {
-  return LocalStorage.getItem<string>("channels-state").then((cachedStateJson) =>
-    cachedStateJson ? (JSON.parse(cachedStateJson) as State) : undefined
-  );
-}
-
-async function setCachedState(state: State): Promise<void> {
-  return LocalStorage.setItem("channels-state", JSON.stringify(state));
-}
 
 interface State {
   profile: UserProfile;
@@ -51,10 +41,13 @@ interface ChannelUI {
   subtitle?: string;
   keywords: string[];
   mentionName: string;
+  email?: string;
   lastTime?: string;
   statusIcon?: Image.ImageLike;
+  statusTooltip?: string;
   icon: Image.ImageLike;
   path: string;
+  mentionCount?: number;
 }
 
 interface Preference {
@@ -73,7 +66,7 @@ export default function Command() {
 }
 
 function ChannelsFinderList(): JSX.Element {
-  const [state, setState] = useState<State | undefined>();
+  const [state, setState] = useCachedState<State | undefined>("channels-state");
   const [loading, setLoading] = useState<boolean>(false);
   const preference = getPreferenceValues<Preference>();
 
@@ -81,19 +74,17 @@ function ChannelsFinderList(): JSX.Element {
     (async () => {
       runAppleScriptSync('launch application "Mattermost"');
 
-      const cachedState = await getCachedState();
-      cachedState && setState(cachedState);
-
       setLoading(true);
       showToast(Toast.Style.Animated, "Fetch teams...");
 
       try {
-        const profile = await MattermostClient.getMe();
-        const teams = await MattermostClient.getTeams();
+        const [profile, teams] = await Promise.all([
+          MattermostClient.getMe(),
+          MattermostClient.getTeams()
+        ]);
         const teamsUI: TeamUI[] = teams.map((team) => ({ id: team.id, name: team.name }));
 
         showToast(Toast.Style.Success, `Found ${teamsUI.length} teams`);
-        setCachedState({ profile: profile, teams: teamsUI });
         setState({ profile: profile, teams: teamsUI });
       } catch (error) {
         showToast(Toast.Style.Failure, `Failed ${error}`);
@@ -157,7 +148,7 @@ function ChannelsFinderList(): JSX.Element {
 }
 
 function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
-  const [team, setTeam] = useState<TeamUI>(props.team);
+  const [team, setTeam] = useCachedState<TeamUI>("channels-team", props.team);
   const [loading, setLoading] = useState<boolean>(false);
   const preference = getPreferenceValues<Preference>();
 
@@ -165,10 +156,15 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
     setLoading(true);
     showToast(Toast.Style.Animated, `Fetch ${team.name} channels...`);
 
-    const [categories, channels] = await Promise.all([
+    const [categories, channels, unreadMessages] = await Promise.all([
       MattermostClient.getChannelCategories(team.id),
       MattermostClient.getMyChannels(team.id),
+      MattermostClient.getUnreadMessages(team.id),
     ]);
+
+    const unreadMessagesMap = new Map(
+      unreadMessages.map(msg => [msg.channel_id, msg])
+    );
 
     const channelsUIMap = new Map<string, ChannelUI>();
 
@@ -187,9 +183,7 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
         return;
       }
 
-      if (!chat.name.includes(profile.id)) {
-        console.error("mismatch between " + profile.id + " and " + chat.name);
-      }
+      const unreadInfo = unreadMessagesMap.get(chat.id);
       const fullName = profile.first_name + " " + profile.last_name;
 
       channelsUIMap.set(chat.id, {
@@ -197,6 +191,7 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
         title: fullName.trim().length != 0 ? fullName : profile.username,
         subtitle: "@" + profile.username,
         mentionName: "@" + profile.username,
+        email: profile.email,
         keywords: [
           profile.first_name,
           profile.last_name,
@@ -208,11 +203,13 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
         ].concat(profile.username.split(".")), // for format: last.first_name
         icon: getAvatarIcon(fullName),
         path: "/messages/@" + profile.username,
+        mentionCount: unreadInfo?.mention_count,
       });
     });
 
     const groupChannels = channels.filter((channel) => channel.type !== "D");
     groupChannels.forEach((channel) => {
+      const unreadInfo = unreadMessagesMap.get(channel.id);
       channelsUIMap.set(channel.id, {
         id: channel.id,
         title: channel.display_name,
@@ -220,6 +217,7 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
         keywords: [channel.display_name, channel.name, channel.header, channel.purpose],
         icon: channel.type == "O" ? Icon.Globe : Icon.Lock,
         path: "/channels/" + channel.name,
+        mentionCount: unreadInfo?.mention_count
       });
     });
 
@@ -234,13 +232,6 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
       };
     });
 
-    const cachedState = await getCachedState();
-    if (cachedState !== undefined) {
-      const teamIndex = cachedState.teams.findIndex((cachedTeam) => cachedTeam.id == team.id);
-      cachedState.teams[teamIndex].categories = categoriesUI;
-      setCachedState(cachedState);
-    }
-
     const profilesStatuses = await MattermostClient.getProfilesStatus(Array.from(directChatsMap.keys()));
     profilesStatuses.forEach((status) => {
       const channel = directChatsMap.get(status.user_id)!;
@@ -254,15 +245,17 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
       channelUI.statusIcon = (() => {
         switch (status.status) {
           case "offline":
-            return "🔘";
+            return { source: Icon.Circle, tintColor: Color.SecondaryText };
           case "online":
-            return "mattermost-online.png";
+            return { source: Icon.CircleFilled, tintColor: Color.Green };
           case "away":
             return "🏃";
           case "dnd":
             return "⛔️";
         }
       })();
+
+      channelUI.statusTooltip = status.status;
     });
 
     setLoading(false);
@@ -287,32 +280,72 @@ function ChannelList(props: { profile: UserProfile; team: TeamUI }) {
     closeMainWindow();
   }
 
+  const getUnreadChannels = (channels: ChannelUI[]): ChannelUI[] => {
+    return channels.filter(channel => channel.mentionCount && channel.mentionCount > 0);
+  };
+
   return (
     <List isLoading={loading} searchBarPlaceholder="Search channel or user">
+      {(team.categories?.flatMap(category => category.channels) || [])
+        .filter(channel => channel.mentionCount && channel.mentionCount > 0)
+        .length > 0 && (
+          <List.Section
+            title="Unread Messages"
+            subtitle={getUnreadChannels(team.categories?.flatMap(category => category.channels) ?? []).length.toString()}
+          >
+            {team.categories?.flatMap(category => category.channels)
+              .filter(channel => channel.mentionCount && channel.mentionCount > 0)
+              .map((channel) => (
+                <ChannelListItem key={`unread-${channel.id}`} channel={channel} onOpen={openChannel} />
+              ))}
+          </List.Section>
+        )}
       {team.categories?.map((category) => {
         return (
           <List.Section key={category.name} title={category.name} subtitle={category.channels.length.toString()}>
-            {category.channels.map((channel) => {
-              return (
-                <List.Item
-                  key={channel.id}
-                  title={channel.title ?? ""}
-                  subtitle={channel.subtitle}
-                  icon={channel.icon}
-                  keywords={channel.keywords}
-                  accessories={[{ text: channel.lastTime }, { icon: channel.statusIcon }]}
-                  actions={
-                    <ActionPanel>
-                      <Action title="Open in Mattermost" onAction={() => openChannel(channel)} />
-                      <Action.CopyToClipboard content={channel.mentionName} />
-                    </ActionPanel>
-                  }
-                />
-              );
-            })}
+            {category.channels.map((channel) => (
+              <ChannelListItem key={channel.id} channel={channel} onOpen={openChannel} />
+            ))}
           </List.Section>
         );
       })}
     </List>
+  );
+}
+
+function ChannelListItem({ channel, onOpen }: { channel: ChannelUI; onOpen: (channel: ChannelUI) => void }) {
+  return (
+    <List.Item
+      key={channel.id}
+      title={channel.title ?? ""}
+      subtitle={channel.subtitle}
+      icon={typeof channel.icon === 'string'
+        ? { source: channel.icon, fallback: getAvatarIcon(channel.title) }
+        : channel.icon
+      }
+      keywords={channel.keywords}
+      accessories={[
+        { text: channel.lastTime },
+        ...(channel.mentionCount && channel.mentionCount > 0 ? [{
+          tag: {
+            value: `${channel.mentionCount} unread`,
+            color: Color.Yellow
+          },
+          tooltip: "Unreaded messages count"
+        }] : []),
+        { icon: channel.statusIcon, tooltip: channel.statusTooltip },
+      ]}
+      actions={
+        <ActionPanel>
+          <Action
+            title="Open in Mattermost"
+            icon={"mattermost-icon-rounded.png"}
+            onAction={() => onOpen(channel)}
+          />
+          <Action.CopyToClipboard title="Copy username" content={channel.mentionName} />
+          {channel.email && <Action.CopyToClipboard title="Copy E-mail" content={channel.email} />}
+        </ActionPanel>
+      }
+    />
   );
 }

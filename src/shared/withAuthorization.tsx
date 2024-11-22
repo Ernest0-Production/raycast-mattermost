@@ -7,18 +7,9 @@ export function withAuthorization(children: ReactNode) {
 
   useEffect(() => {
     (async () => {
+      showToast(Toast.Style.Animated, "Wake up session...");
       setAuthorized(await MattermostClient.wakeUpSession());
-      showToast(Toast.Style.Animated, "Authorize...");
-
-      try {
-        await MattermostClient.login();
-        setAuthorized(true);
-      } catch (error) {
-        showToast(Toast.Style.Failure, `Authorization failed: ${error}`);
-        setAuthorized(error as Error);
-      }
-
-      showToast(Toast.Style.Success, "Authorized");
+      showToast(Toast.Style.Success, "Wake up session successfull");
     })();
   }, []);
 
